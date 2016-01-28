@@ -1,0 +1,406 @@
+#!/usr/bin/php -q
+<?php
+error_reporting(0);
+
+$vmailhome = "/home/vmail";
+$server = 'localhost';
+$user  = 'mail_admin';
+$database = 'user';
+$password = 'pwd';
+// Crate dire user group permissions
+$owner = "vmail";
+$group = "vmail";
+$permissions = 0700;
+
+$version = "0.071";  // 20 Feb 2014
+$usage = "Version: $version\n" .
+         "Usage: mailuser --domain [example.com]\n" .
+         "       mailuser --user [username@example.com]\n" .
+         "       mailuser --changepassword [username@example.com] [oldpassword] [newpassword]\n" .
+         "       mailuser --deluser [username@example.com]\n" .
+         "       mailuser --forward [source] [destination1,destination2...destinationN]\n" .
+         "       mailuser --delforward [username@example.com]\n" .
+         "       mailuser --show [example.com] | --show all\n";
+
+
+function send_mail($to,$subject,$body)
+{
+  $para = $to;
+  $titulo = $subject;
+  $mensaje = $body;
+  $cabeceras = 'From: noreply@ns1.internam.com' . "\r\n" .
+    'Reply-To: noreply@example.com' . "\r\n" .
+    'X-Mailer: PHP/' . phpversion();
+
+  mail($para, $titulo, $mensaje, $cabeceras);
+}
+
+function prompt_silent($prompt = "Enter mail_admin Password:")
+{
+  if (preg_match('/^win/i', PHP_OS)) {
+    $vbscript = sys_get_temp_dir() . 'prompt_password.vbs';
+    file_put_contents(
+      $vbscript, 'wscript.echo(InputBox("'
+      . addslashes($prompt)
+      . '", "", "password here"))');
+    $command = "cscript //nologo " . escapeshellarg($vbscript);
+    $password = rtrim(shell_exec($command));
+    unlink($vbscript);
+    return $password;
+  } else {
+    $command = "/usr/bin/env bash -c 'echo OK'";
+    if (rtrim(shell_exec($command)) !== 'OK') {
+      trigger_error("Can't invoke bash");
+      return;
+    }
+    $command = "/usr/bin/env bash -c 'read -s -p \""
+      . addslashes($prompt)
+      . "\" mypassword && echo \$mypassword'";
+    $password = rtrim(shell_exec($command));
+    echo "\n";
+    return $password;
+  }
+}
+
+
+//$password = prompt_silent();
+if ($res = mysql_connect($server,$user,$password) != FALSE) {
+  if(mysql_select_db($database)) {
+  } else die("Not authorized\n");
+} else die("Not authorized\n");
+
+
+if ($argc > 2) {
+  if ($argv[1] == '--forward' ) {
+    if ($argc != 4) die("Bad parameter count\n");
+    $sql = "SELECT 1 as conteo FROM users where email = '".$argv[2]."'";
+    $res = mysql_query($sql);
+    if ($res != false) {
+      $row = mysql_fetch_assoc($res);
+
+      if ($row['conteo']!=0) {
+        $sql2 = "SELECT count(*) as conteo FROM forwardings WHERE source = '".$argv[2]."'";
+        $res2 = mysql_query($sql2);
+        if ($res2 != false) {
+          $row2 = mysql_fetch_assoc($res2);
+          if ($row2['conteo'] !=0) {
+            $mod_sql = "UPDATE forwardings SET source = '$argv[2]', destination='$argv[3]' WHERE source = '" . $argv[2] . "'";
+            $text = "updated";
+            $text2 = "Update";
+          } else {
+            $mod_sql = "INSERT INTO forwardings (source, destination) values('$argv[2]','$argv[3]')";
+            $text = "created";
+            $text2 = "Create";
+          }
+          $res3 =  mysql_query($mod_sql);
+          if ($res3 != FALSE) {
+            die("Forward $text\n");
+          } else {
+            die($text2 . " Error: cannot save in forwardings table\n" . mysql_error() . "\n");
+          }
+        }
+        else
+          die("Error: cannot read from forwardings table\n" . mysql_error() . "\n");
+      } else {
+        die("Mailbox $argv[2] does not exists\n");
+      }
+
+      //if (mysql_query($sql)!= false) die("User $text\n"); else die("DB Error");
+
+    } else die("Error: cannot read from users table\n" . mysql_error() . "\n");
+  }
+
+  else if ($argv[1] == '--domain') {
+    $sql = "SELECT count(*) as conteo FROM domains where domain = '".$argv[2]."'";
+    $res = mysql_query($sql);
+    if ($res != false) {
+      $row = mysql_fetch_assoc($res);
+      if ($row['conteo']!=0) {
+         die("Domain ".$argv[2]." already exists\n");
+      } else {
+        $sql = "INSERT INTO domains (domain) VALUES ('".$argv[2]."');";
+        if (mysql_query($sql)!= false) die("Domain created\n");
+        else die("Error: cannot save in domains table\n" . mysql_error() . "\n");
+      }
+    } else die("Error: cannot read from domains table\n" . mysql_error() . "\n");
+  }
+
+  else if ($argv[1] == '--delforward') {
+    $email = $argv[2];
+    $forward_sql = "DELETE FROM forwardings WHERE source = '" . $email . "'";
+    $res = mysql_query($forward_sql);
+    if ($res != false) {
+      if (mysql_affected_rows()>0)
+        die("Forwarding deleted\n");
+      else
+        die("Forwarding not found or could not be deleted\n");
+    }
+    else
+      die("Error: cannot read from forwardings table\n" . mysql_error() . "\n");
+  }
+
+  else if ($argv[1] == '--deluser') {
+    $email = $argv[2];
+    // Borrar Fw.
+
+    $forward_sql = "delete from forwardings where source = '".$email."'";
+    @mysql_query($forward_sql);
+    $sql = "SELECT count(*) as conteo FROM users where email = '".$email."'";
+    $res = mysql_query($sql);
+    if ($res != false) {
+        $row = mysql_fetch_assoc($res);
+        if ($row['conteo']>0) {
+
+          $sql2 = "DELETE FROM users where email = '".$email."'";
+          $res2 = mysql_query($sql2);
+          if ($res2 != false) {
+            if (mysql_affected_rows()>0)
+            {
+                $email_array = explode("@",$email);
+                $username = $email_array[0];
+                $domain =   $email_array[1];
+                $userdir = "/home/vmail/$domain/$user";
+                if (file_exists($userdir) && $domain != "" && $user != "" )
+                exec("/bin/rm $userdir -fr");
+
+                die("Mailbox deleted\n");
+
+            } else die ("Error: cannot save in users table\n");
+
+          } else die("Error: cannot save in users table\n" . mysql_error() . "\n");
+        } else die("Mailbox does not exist\n");
+    } else die("Error: cannot read from users table\n" . mysql_error() . "\n");
+  }
+
+  else if ($argv[1] == '--user') {
+    $sql = "SELECT count(*) AS conteo FROM users WHERE email = '".$argv[2]."'";
+    $res = mysql_query($sql);
+    if ($res != false) {
+      $row = mysql_fetch_assoc($res);
+
+      $tries = 0;
+      do {
+        $tries++;
+        if ($tries > 3)
+          die("You are drunk\n");
+        $pass1 = prompt_silent("Enter new password for user ".$argv[2].":");
+        $pass2 = prompt_silent("Confirm:");
+
+        if ($pass1 != $pass2)
+          echo "Passwords don't match. CTRL-C to abort\n";
+        else
+          break;
+      } while(true);
+
+      if ($row['conteo'] != 0) {
+        echo "User already exists ENTER to continue to change password, ctrl-c to cancel";
+        fgets(STDIN);
+
+        $sql = "UPDATE users SET password = ENCRYPT('".$pass1."','salt') WHERE email = '".$argv[2]."'";
+        $text = "password updated";
+      } else {
+        $sql = "INSERT INTO users (email, password) VALUES ('".$argv[2]."', ENCRYPT('".$pass1."','salt'))";
+        $text = "created";
+      }
+      // Create muttrc.
+      $user_email  = $argv[2];
+      $email_array =  explode("@", $user_email);
+      if (count($email_array)>0) {
+
+
+        $userStr   = (trim($email_array[0]));
+        $nameStr   = ucfirst(trim($email_array[0]));
+        $domainStr = $email_array[1];
+
+       
+        
+        $muttdir        = "$vmailhome/$domainStr/$userStr/";
+        $muttrccontents .= "set spoolfile=\"+INBOX\"".PHP_EOL;
+        $muttrccontents .= "## Default color definitions ".PHP_EOL;                                                                                                  
+        $muttrccontents .= "#color hdrdefault white green ".PHP_EOL;                                                                                                   
+        $muttrccontents .= "color signature brightmagenta black".PHP_EOL;
+        $muttrccontents .= "color indicator black cyan".PHP_EOL;
+        $muttrccontents .= "color attachment black green".PHP_EOL;
+        $muttrccontents .= "color error red black".PHP_EOL;
+        $muttrccontents .= "color message white black".PHP_EOL;
+        $muttrccontents .= "color search brightwhite magenta".PHP_EOL;
+        $muttrccontents .= "color status brightyellow blue".PHP_EOL;
+        $muttrccontents .= "color tree brightblue black".PHP_EOL;
+        $muttrccontents .= "color normal white black".PHP_EOL;
+        $muttrccontents .= "color tilde green black".PHP_EOL;
+        $muttrccontents .= "color bold brightyellow black".PHP_EOL;
+        $muttrccontents .= "#color underline magenta black         ".PHP_EOL;                                                                                          
+        $muttrccontents .= "color markers brightcyan black".PHP_EOL;
+        $muttrccontents .= "alias infol \"Tom:q\" <info@fortmap.com>".PHP_EOL;
+        $muttrccontents .= "set from=\"$nameStr <$user_email>\"";
+
+        // Create and give proper permissions for $muttdir
+
+          if ( !file_exists($muttdir) ) {
+            @mkdir($muttdir,$permissions);
+            if (file_exists($muttdir)) {
+
+              chown($muttdir,$owner);
+              chgrp($muttdir,$group);
+
+
+            }
+
+          } 
+
+
+        // 
+
+       
+
+          if (!file_exists($muttdir.".muttrc")) {
+
+
+
+           if (file_put_contents($muttdir.".muttrc", $muttrccontents) === false) {
+
+              echo "WARNING: Could not create muttrc file in ($muttdir)".PHP_EOL;
+           } else
+              echo "Default settings created on ".$muttdir.".muttrc".PHP_EOL;
+
+          } else echo "WARNING muttrc file already exists on ($muttdir)".PHP_EOL;
+
+
+        
+
+      }
+
+     
+
+
+
+      if (mysql_query($sql) != false) {
+        if ($text == "created") {
+          send_mail($argv[2],"Welcome to your email", "This is your first message.");
+        }
+        die("User $text\n");
+      } else die("Error: cannot read from users table\n" . mysql_error() . "\n");
+    } else die("Error: cannot read from users table\n" . mysql_error() . "\n");
+  }
+
+  else if ($argv[1] == '--changepassword') {
+    //    0              1                 2                  3             4
+    // mailuser --changepassword [username@example.com] [oldpassword] [newpassword]
+    if ($argc != 5) {
+      echo $usage;
+      exit;
+    }
+    else {
+      $sql = "SELECT count(*) AS conteo FROM users WHERE email = '".$argv[2]."'";
+      // //$sql = "SELECT count(*) AS conteo FROM users WHERE email = '".$argv[2]."' AND password = ENCRYPT('".$argv[3]."','salt')";
+      $res = mysql_query($sql);
+      if ($res != false) {
+        $row = mysql_fetch_assoc($res);
+
+        if ($row['conteo'] == 0) {
+          echo "The login information entered was not correct. Please try re-entering your username and password\n";
+        }
+        else {
+          $sql = "UPDATE users SET password = ENCRYPT('".$argv[4]."','salt') WHERE email = '".$argv[2]."'";
+          if (mysql_query($sql) != false)
+            die("User password updated\n");
+          else
+            die("Error: cannot read from users table\n" . mysql_error() . "\n");
+        }
+      }
+      else
+        die("Error: cannot read from users table\n" . mysql_error() . "\n");
+    }
+  }
+
+  else if ($argv[1] == '--show') {
+    // --show domain.com
+    // --show domain
+    // --show all
+    $largv2 = strtolower ($argv[2]);
+
+    // Si igaspro, convertir a igaspro.com
+    if ($largv2 != "all") {
+      $lPos = strpos ($largv2, ".");
+      if ($lPos === false)
+        $largv2 = $largv2 . ".com";
+
+      // Validar domain
+      $lResult = mysql_query (
+        "SELECT * " .
+        "FROM domains " .
+        "WHERE domain = '" . $largv2 . "'"
+      ) or die (mysql_error ());
+
+      $lRecordCount = mysql_num_rows ($lResult);
+      if ($lRecordCount == 0)
+        die("Domain does not exist\n");
+    }
+
+    // Buscar Users
+    if ($largv2 != "all") {
+      $lResult = mysql_query (
+        "SELECT email " .
+        "FROM users " .
+        "WHERE email LIKE '%" . $largv2 . "'"
+      ) or die (mysql_error ());
+    }
+    else {
+      $lResult = mysql_query (
+        "SELECT email " .
+        "FROM users " .
+        "ORDER BY email "
+      ) or die (mysql_error ());
+    }
+
+    $lRecordCount = mysql_num_rows ($lResult);
+    if ($lRecordCount == 0) {
+      if ($largv2 != "all")
+        die("No accounts in domain\n");
+      else
+        die("No accounts\n");
+    }
+    else {
+      $lArrayEmails = array ();
+      for ($i=0; $i < $lRecordCount; $i++) {
+        $lRow = mysql_fetch_assoc ($lResult);
+        $lRow = array_change_key_case ($lRow, CASE_LOWER);
+
+        $lEmail = $lRow ["email"];
+        $lArrayEmails [] = $lEmail;
+      }
+
+      // Buscar Forwards
+      $lSalida = "";
+      for ($i=0; $i < count ($lArrayEmails); $i++) {
+        $lResult = mysql_query (
+          "SELECT * " .
+          "FROM forwardings " .
+          "WHERE source = '" . $lArrayEmails [$i] . "'"
+        ) or die (mysql_error ());
+
+        $lRecordCount = mysql_num_rows ($lResult);
+        if ($lRecordCount > 0) {
+          $lRow = mysql_fetch_assoc ($lResult);
+          $lRow = array_change_key_case ($lRow, CASE_LOWER);
+
+          $lDestination = $lRow ["destination"];
+          $lSalida = $lSalida . $lArrayEmails [$i] . " (Forwards: " . $lDestination . ")\n";
+        }
+        else
+          $lSalida = $lSalida . $lArrayEmails [$i] . "\n";
+      }
+
+      // Resultado
+      die ($lSalida);
+    }
+  }
+  else {
+    echo $usage;
+    exit;
+  }
+}
+else {
+  echo $usage;
+  exit;
+}
